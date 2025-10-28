@@ -1,0 +1,130 @@
+# Accidental $70k Google Pixel Lock Screen Bypass — notes
+
+**Source:** research writeup by David Hu (bugs.xdavidhu.me). Detailed upstream fix (AOSP/GitHub commit) is referenced. ([bugs.xdavidhu.me][1])
+
+---
+
+## TL;DR
+
+* A physical-access lock-screen bypass affecting Google Pixel devices was reported in 2022. The bug allowed an attacker with physical access and a SIM card (for which they know the PUK) to unlock a locked Pixel device and reach the home screen. The issue was fixed in a November 2022 security update; the reporter was awarded $70,000. ([bugs.xdavidhu.me][1])
+
+---
+
+## Affected hardware / scope
+
+* Google Pixel phones (reported on Pixel 5 and Pixel 6 in testing). The underlying problem was in Android Platform code (Keyguard/KeyguardSecurityContainer), so other vendors using similar code paths could be affected. ([bugs.xdavidhu.me][1])
+
+---
+
+## CVE / tracking
+
+* Tracked as CVE-2022-20465 in public references included in the writeup. ([bugs.xdavidhu.me][1])
+
+---
+
+## Impact
+
+* Full lock-screen bypass: attacker gains access to the device UI (home screen) and therefore can access data/apps that are otherwise protected by the lock screen.
+* Exploitation requires only physical access and a SIM card for which the attacker knows the PUK (or has a PIN-locked SIM whose PUK they can obtain).
+* Because it bypasses fingerprint/PIN/password protections, it’s high severity for confidentiality/privacy of device contents. ([bugs.xdavidhu.me][1])
+
+---
+
+## High-level description of the vulnerability
+
+* Android manages multiple “security screens” (SIM PIN/PUK screen, fingerprint screen, PIN/password screen) using a stack-like structure.
+* When the SIM PUK reset flow completed, the PUK component called a `.dismiss()` method to remove the PUK security screen from the stack.
+* `.dismiss()` originally dismissed whatever security screen was currently considered active; this made it vulnerable to a race condition: if some background component updated the active security screen (for example, switching it to the fingerprint screen) before the PUK code executed `.dismiss()`, the PUK code could end up dismissing the *wrong* security screen (e.g., the fingerprint screen).
+* Dismissing the fingerprint security screen in that state caused the keyguard to be marked as unlocked (i.e., the device transitioned to unlocked), producing a full lock-screen bypass. ([bugs.xdavidhu.me][1])
+
+---
+
+## Reproduction (as described by the researcher)
+
+> Steps reproduced by the author on Pixel 5 and Pixel 6 (summary, keep safety in mind — do not attempt on devices you do not own):
+
+1. Boot a Pixel device (or start from a locked state).
+2. Trigger SIM PIN failure: enter an incorrect SIM PIN 3 times so the SIM locks and requires a PUK (this is carrier SIM behavior).
+3. Use a PUK code (from SIM packaging) to unlock the SIM and choose a new SIM PIN when prompted.
+4. After PUK entry and new PIN selection, observe the device state:
+
+   * In some sequences, the device shows a fingerprint icon (instead of lock icon), accepts fingerprint, then gets “Pixel is starting...” (glitch) and may require a reboot.
+   * In a specific sequence (hot-swap SIM tray while device locked / or sometimes after a reboot), after completing the PUK reset the device transitions to the home screen — i.e., it is unlocked without entering device PIN/password. ([bugs.xdavidhu.me][1])
+
+**Exploit notes**
+
+* Attacker model: attacker needs physical device access and a SIM that is PIN-locked (and for which attacker knows the PUK), or can otherwise cause the SIM PUK flow to occur using a SIM they control.
+* No remote access or special tools required aside from a SIM-ejection implement and a SIM with known PUK/code. ([bugs.xdavidhu.me][1])
+
+---
+
+## Root cause (technical)
+
+* Race condition in keyguard security screen dismissal logic:
+
+  * The PUK reset flow invoked `KeyguardSimPukViewController` which calls `dismiss()` on the keyguard security container.
+  * The `dismiss()` implementation did not validate that the dismiss request corresponded to the same security screen type it intended to dismiss. If the active security screen changed in the interval (caused by some other background SIM-status listener), the `dismiss()` call could remove the wrong screen.
+  * Removing the fingerprint (or other primary security screen) prematurely marked the keyguard as unlocked, producing a full bypass.
+* So, the root cause is an insufficiently constrained `dismiss()` API and a race between multiple components that react to SIM state changes. ([bugs.xdavidhu.me][1])
+
+---
+
+## Upstream fix (what changed)
+
+* The upstream AOSP fix modifies the `dismiss()` API to require an explicit `SecurityMode` parameter. Callers must now specify the security screen type they expect to dismiss (for example: `SecurityMode.SimPuk`).
+* When a `dismiss(SecurityMode)` call is received, the code checks the current security screen type; if it does not match the supplied `SecurityMode`, the request is ignored. This prevents a PUK-flow dismiss call from accidentally dismissing a different screen that became active in the meantime.
+* The fix touches multiple keyguard files and adds the required parameter to `dismiss()` calls across the codebase (several controllers updated to pass `getSecurityMode()` or `SecurityMode.SimPuk` as appropriate). The commit shows 12 files changed in `packages/SystemUI/src/com/android/keyguard`. ([GitHub][2])
+
+Key points from the commit message:
+
+* Add a `SecurityMode` parameter to every call to `dismiss()` and ignore the request if the parameter does not match the current security mode.
+* This prevents the incorrect recognition of a successful PIN/pattern/password unlock when a `dismiss()` comes after the security method changes. ([GitHub][2])
+
+---
+
+## Timeline (as reported)
+
+* Researcher discovered the behavior after a SIM/PUK interaction in 2022.
+* Reported to Android VRP; initial triage happened quickly but communication and resolution took months.
+* Researcher set disclosure deadlines; Google triaged and eventually rolled a fix in the November 5, 2022 security update. Due to details around duplicate handling and reporting timeline, the researcher was awarded $70,000 (an exception to duplicate rules). Full narrative and correspondence are in the writeup feed. ([bugs.xdavidhu.me][1])
+
+---
+
+## Proof-of-Concept (PoC) considerations
+
+* PoC requires physical access; do not attempt exploitation on devices you do not own.
+* The required steps are simple user interactions (enter incorrect SIM PINs, PUK entry, new PIN selection, and SIM swap/hot-swap variations). Because the exploitation requires physical actions and modifies SIM locking state, maintain safe testing practices (back up data, test on non-production devices).
+* The researcher intentionally did not release a full live exploit due to the high impact and the proximity of the vendor fix. ([bugs.xdavidhu.me][1])
+
+---
+
+## Recommendations / mitigations
+
+* For end users:
+
+  * Install security updates promptly. The bug was fixed in the Android security update (November 5, 2022) — ensure device OS is updated. ([bugs.xdavidhu.me][1])
+  * Maintain physical control of your device; do not leave it unattended where someone can swap SIMs.
+  * Do not share SIM PUK codes or other sensitive SIM credentials.
+* For vendors / engineers (postmortem takeaways):
+
+  * Avoid ambiguous dismiss semantics in multi-state security stacks — require callers to assert the intended target (security mode) for state transitions.
+  * Implement strong invariants or checks when removing UI/mode stack entries that can be triaged by multiple asynchronous components.
+  * Add unit/integration tests for race conditions around SIM-state transitions and security screen transitions (commit added relevant tests as part of the patch). ([GitHub][2])
+
+---
+
+## Files / code locations touched (summary from commit)
+
+* `packages/SystemUI/src/com/android/keyguard/` — multiple controllers and container classes (e.g., `KeyguardSecurityContainerController`, `KeyguardSimPukViewController`, `KeyguardAbsKeyInputViewController`, `KeyguardHostViewController`, `AdminSecondaryLockScreenController`, etc.) were updated to add/propagate the `SecurityMode` parameter to `dismiss()` calls. The fix changed ~12 files with ~+102 / -26 lines across the bundle. ([GitHub][2])
+
+---
+
+## References
+
+* Primary writeup: “Accidental $70k Google Pixel Lock Screen Bypass” — David Hu. Full narrative, reproduction notes, timeline, and links. ([bugs.xdavidhu.me][1])
+* Upstream patch (AOSP mirror on GitHub): commit `ecbed81` titled “Do not dismiss keyguard after SIM PUK unlock” — shows the code changes and commit message. ([GitHub][2])
+
+---
+
+[1]: https://bugs.xdavidhu.me/google/2022/11/10/accidental-70k-google-pixel-lock-screen-bypass/ "Accidental $70k Google Pixel Lock Screen Bypass - bugs.xdavidhu.me"
+[2]: https://github.com/aosp-mirror/platform_frameworks_base/commit/ecbed81c3a331f2f0458923cc7e744c85ece96da "Do not dismiss keyguard after SIM PUK unlock · aosp-mirror/platform_frameworks_base@ecbed81 · GitHub"
