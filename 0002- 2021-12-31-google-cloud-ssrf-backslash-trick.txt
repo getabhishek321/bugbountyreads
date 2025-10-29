@@ -147,7 +147,7 @@ For engineering teams who maintain proxies or URL-based forwarders:
   * `status: disclosed / patched` (confirm with vendor bulletin if you need absolute proof)
   * `references: [xdavidhu writeup]`
 
----
+----- does it includes post exploitation of fix?
 
 ## References
 
