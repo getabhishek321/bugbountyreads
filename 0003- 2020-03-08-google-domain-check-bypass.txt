@@ -1,0 +1,150 @@
+Below is a ready-to-upload GitHub Markdown document with detailed, human-written notes on “The unexpected Google wide domain check bypass” by David Hu. It covers the attack narrative, technical root cause, PoC, impact, timeline, remediation, and defensive takeaways. All critical internet-derived statements are cited to the original writeup. You can copy-paste this into a file (suggested name below) and commit to your repo.
+
+---
+
+# The unexpected Google-wide domain-check bypass — notes
+
+**Source:** David Hu — “The unexpected Google wide domain check bypass”. ([bugs.xdavidhu.me][1])
+
+---
+
+## TL;DR
+
+A domain whitelist check implemented using a complex regular expression accepted an input where the JavaScript regex considered the whole string to be the authority (host), while the browser’s URL parser treated a backslash (`\`) as an authority terminator. By inserting `\` between an attacker-controlled domain and a whitelisted suffix (for example `xdavidhu.me\test.corp.google.com`), the regex's extracted authority ended with `.corp.google.com` (allowing the check), but the browser and `URL` object resolved the host as `xdavidhu.me`. This mismatch enabled embedding the `henhouse` IFrame on an attacker-controlled page and receiving API keys via `postMessage`. The closure/central library was later updated and the reporter received a reward. ([bugs.xdavidhu.me][1])
+
+---
+
+## Affected component / scope
+
+* The vulnerability originated from `henhouse` (a small iframe app used by Google’s API docs) which accepted a `pb` parameter containing an embedding origin and then posted API keys to that origin when it matched a whitelist. The same whitelist-parsing regex was widely reused across many Google properties, so the issue had broader reach than the single app. ([bugs.xdavidhu.me][1])
+
+---
+
+## High-level vulnerability summary
+
+* A whitelist check used `getAuthorityFromMagicRegex(domainURL)` to extract the authority (userinfo@host:port) via a heavy regex and then performed `endsWith` checks against whitelisted suffixes (e.g., `.corp.google.com`).
+* The browser’s URL parsing semantics treat `/`, `?`, `#`, and `\` as authority terminators; the regex did not treat `\` as an authority terminator.
+* By placing a backslash between an attacker domain and a whitelisted suffix, the regex returned an authority that ended with the whitelisted suffix, while the browser treated the hostname as the attacker domain. The iframe code therefore believed the origin was allowed and executed `postMessage` sending API key material to the attacker-controlled page. ([bugs.xdavidhu.me][1])
+
+---
+
+## The exact trick (example)
+
+* Example URL used inside the `pb` parameter:
+
+  ```
+  https://console.developers.google.com/henhouse/?pb=["hh-0","gmail",null,[],"https://xdavidhu.me\test.corp.google.com", ...]
+  ```
+* In the regex-based authority extraction, `xdavidhu.me\test.corp.google.com` is considered the authority and ends with `.corp.google.com`, satisfying the `endsWith` check.
+* When parsed by the browser (via `new URL(...)`), the `\` is treated as an authority terminator; `url.hostname` becomes `xdavidhu.me`, and the remainder becomes part of the path. Thus the actual origin becomes `https://xdavidhu.me`. The page served from that origin receives `postMessage` with the API key. ([bugs.xdavidhu.me][1])
+
+---
+
+## Reproduction (safe, high-level)
+
+* The researcher demonstrated the issue by embedding the `henhouse` iframe with a crafted `pb[4]` value containing the backslash trick and listening for `postMessage` events on their domain. The console PoC shows the key arriving in `message` events. Example PoC snippet from the writeup:
+
+  ```html
+  <iframe id="test"
+    src='https://console.developers.google.com/henhouse/?pb=["hh-0","gmail",null,[],"https://xdavidhu.me\test.corp.google.com", ...]'>
+  </iframe>
+  <script>
+    window.addEventListener('message', function (d) {
+      if (d.data[1] == "apikey-credential") {
+        console.log("Your API key:", d.data[2]);
+      }
+    });
+  </script>
+  ```
+* Safety note: do not run this PoC against systems you do not own or without permission. The writeup’s PoC demonstrates the parsing mismatch; the researcher responsibly reported the issue. ([bugs.xdavidhu.me][1])
+
+---
+
+## Root cause (technical)
+
+* Two different parsing/normalization behaviors were being used:
+
+  1. A custom regular expression extracting an authority string and then running `endsWith` checks on that extracted string.
+  2. The browser’s `URL` parsing (WHATWG / Chromium behavior), which treats `\` as an authority-terminating slash.
+* The regex treated `\` just like an ordinary character inside the authority, which permitted synthetic authorities that ended with whitelisted suffixes while the browser resolved the actual origin to the attacker domain. This divergence between the validator and the actual runtime resolver is the root cause. ([bugs.xdavidhu.me][1])
+
+---
+
+## Impact
+
+* The immediate impact on `henhouse` was leaking generated API keys or OAuth client identifiers via `postMessage` to attacker-controlled origins if a victim loaded a crafted URL or clicked a malicious link.
+* Because the same regex/library was present across multiple Google properties (Cloud Console, Actions Console, YouTube Studio, myaccount.google.com, and even some internal corp pages), the blast radius was larger than the single app.
+* Practical impact in the specific context was low-to-medium (API keys or client IDs without secrets), but the ubiquity of the library made it a significant systemic risk. ([bugs.xdavidhu.me][1])
+
+---
+
+## Evidence & investigation notes
+
+* The researcher enumerated the regex behavior by fuzzing all ASCII punctuation/characters placed between a domain and a whitelisted suffix and observed which characters terminate the authority in the browser’s `URL` parser. The test found four characters that ended the authority: `/`, `?`, `#`, and `\`. The presence of `\` as an authority terminator in browsers was confirmed in Chrome, Firefox, and Safari. ([bugs.xdavidhu.me][1])
+* The researcher inspected Chromium source code to confirm `IsURLSlash` treats backslash as a slash (`'/' || '\\'`). ([bugs.xdavidhu.me][1])
+
+---
+
+## Fix / upstream remediation
+
+* The problematic regex was part of Google’s shared JavaScript (Closure library). After disclosure, a commit was made to the library to address the issue (the author found their own code in the Closure library history). The writeup points to the specific Closure library commit that corresponds to the fix. The issue was fixed within weeks of reporting. ([bugs.xdavidhu.me][1])
+
+---
+
+## Timeline (as reported)
+
+* Jan 04, 2020 — Bug reported. ([bugs.xdavidhu.me][1])
+* Jan 06, 2020 — Initial triage and bug accepted (severity moved from P4 to P1). ([bugs.xdavidhu.me][1])
+* Jan 17, 2020 — Reward of $6,000 issued to the reporter. ([bugs.xdavidhu.me][1])
+* Mar 06, 2020 — Bug fixed. ([bugs.xdavidhu.me][1])
+
+---
+
+## Mitigations and defensive takeaways
+
+For implementers of origin/host whitelists or any logic accepting user-supplied URLs:
+
+1. **Normalize using the same parser that will be used at runtime**
+   Always canonicalize and validate URLs using the same URL parsing and resolution semantics that the runtime (browser or HTTP client) will use. Differences in normalization are a common source of bypasses. ([bugs.xdavidhu.me][1])
+
+2. **Avoid brittle regex-based URL parsing for security decisions**
+   Don’t rely on hand-rolled regex to extract authority when robust URL-parsing libraries are available. Regex often misses edge cases and differences between URL grammars. ([bugs.xdavidhu.me][1])
+
+3. **Strip or forbid userinfo and other dangerous URL components**
+   Remove userinfo (`user:pass@`), path-embedded host tricks, backslashes, and other suspicious constructs before evaluating whitelists. ([bugs.xdavidhu.me][1])
+
+4. **Prefer allow-lists against canonical hostnames or resolved IPs**
+   If possible, map inbound hostnames to canonical hostnames or resolved IP ranges and check after DNS resolution. Where feasible, avoid textual `endsWith` checks that are easily tricked by path/userinfo characters. ([bugs.xdavidhu.me][1])
+
+5. **Minimize sensitive data exposure to embeddable/iframe contexts**
+   Don’t post secrets, tokens, or generated API credentials to an origin that can be influenced by user input. Where `postMessage` is used, strictly validate `event.origin` using the same canonicalization logic that produced the value. ([bugs.xdavidhu.me][1])
+
+6. **Audit shared libraries used in security decisions**
+   Security-critical code in shared or widely distributed libraries (like Closure) carries systemic risk. Periodically audit the parts of shared libraries that affect security boundaries. ([bugs.xdavidhu.me][1])
+
+---
+
+## Suggested GitHub file name / metadata
+
+* Filename suggestion: `notes/2020-03-08-google-domain-check-bypass.md`
+* Suggested front-matter (if you use metadata):
+
+  ```yaml
+  title: "The unexpected Google-wide domain check bypass"
+  author: "David Hu (writeup)"
+  date: 2020-03-08
+  severity: medium
+  status: fixed
+  references:
+    - https://bugs.xdavidhu.me/google/2020/03/08/the-unexpected-google-wide-domain-check-bypass/
+  ```
+
+---
+
+## References
+
+* Original writeup: “The unexpected Google wide domain check bypass” — David Hu.
+
+---
+
+[1]: https://bugs.xdavidhu.me/google/2020/03/08/the-unexpected-google-wide-domain-check-bypass/ "The unexpected Google wide domain check bypass - bugs.xdavidhu.me"
