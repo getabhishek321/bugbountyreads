@@ -1,7 +1,3 @@
-Below is a ready-to-upload GitHub Markdown document with detailed, human-written notes on “The unexpected Google wide domain check bypass” by David Hu. It covers the attack narrative, technical root cause, PoC, impact, timeline, remediation, and defensive takeaways. All critical internet-derived statements are cited to the original writeup. You can copy-paste this into a file (suggested name below) and commit to your repo.
-
----
-
 # The unexpected Google-wide domain-check bypass — notes
 
 **Source:** David Hu — “The unexpected Google wide domain check bypass”. ([bugs.xdavidhu.me][1])
