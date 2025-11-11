@@ -1,0 +1,484 @@
+Here’s a ready-to-upload GitHub markdown note for:
+
+**“The Embedded YouTube Player Told Me What You Were Watching (and more)” — David Hu** ([bugs.xdavidhu.me][1])
+
+You can drop it into something like:
+`notes/2021-01-18-youtube-embedded-player-history-leak.md`
+
+---
+
+# The Embedded YouTube Player Told Me What You Were Watching (and more) — notes
+
+**Original writeup:** David Hu – “The Embedded YouTube Player Told Me What You Were Watching (and more)” ([bugs.xdavidhu.me][1])
+
+---
+
+## TL;DR
+
+The YouTube IFrame Player, when embedded on an attacker-controlled site, could be abused to act “as the victim” and read sensitive playlists that only the owner should normally see.
+
+By embedding special internal playlists (Watch History, Watch Later, Liked Videos, Uploads, and even arbitrary private playlists) and using the JavaScript Player API (`getPlaylist()` and `getVideoData()`), an attacker could:
+
+* Steal a victim’s Watch History
+* Steal their Watch Later list
+* Enumerate all Liked Videos
+* Enumerate all uploaded videos, including unlisted ones
+* Extract some metadata (title, captions info) of private videos if the ID was known
+
+All this happened simply by luring a logged-in YouTube user to visit a malicious page with an embedded player. The bug was reported in October 2019 and eventually fixed; reward was 1,337 USD. ([bugs.xdavidhu.me][1])
+
+---
+
+## Chapter 1 — “Your special playlists you never created”
+
+The bug relies heavily on how YouTube internally uses special playlists that every user has, even if they never manually created any. ([bugs.xdavidhu.me][1])
+
+### 1. Watch History playlist (`HL`)
+
+* Every user has a playlist with ID `HL` (“History List”).
+* It contains every video the user has watched. ([bugs.xdavidhu.me][1])
+
+### 2. Watch Later playlist (`WL`)
+
+* The “clock” icon on YouTube (“Watch Later”) is just another special playlist with ID `WL`.
+* When you click “Watch Later”, the video is added to this internal playlist. ([bugs.xdavidhu.me][1])
+
+### 3. Liked Videos playlist (derived from channel ID)
+
+This playlist is not as straightforward:
+
+* The playlist ID is derived from the user’s channel ID (24 characters, visible in the URL of the channel page):
+  Example:
+
+  ```text
+  https://www.youtube.com/channel/UCBvX9uEO0a3fZNCK12MAgug
+  channel_id = "UCBvX9uEO0a3fZNCK12MAgug"
+  ```
+* The “Liked Videos” playlist ID can be guessed by replacing the first three characters with `LLD` or `LLB` (one of them is correct): ([bugs.xdavidhu.me][1])
+
+  ```text
+  "UCBvX9uEO0a3fZNCK12MAgug" -> "LLDvX9uEO0a3fZNCK12MAgug"
+  "UCBvX9uEO0a3fZNCK12MAgug" -> "LLBvX9uEO0a3fZNCK12MAgug"
+  ```
+
+### 4. Uploads playlist (all videos, all privacy levels)
+
+This is the most important for the attack:
+
+* The “Uploads” playlist contains every video on that channel (Public, Unlisted, and Private). ([bugs.xdavidhu.me][1])
+* Similarly, its ID is derived from the channel ID by replacing the first three characters with `UUD` or `UUB`:
+
+  ```text
+  "UCBvX9uEO0a3fZNCK12MAgug" -> "UUDvX9uEO0a3fZNCK12MAgug"
+  "UCBvX9uEO0a3fZNCK12MAgug" -> "UUBvX9uEO0a3fZNCK12MAgug"
+  ```
+
+### 5. Why you can’t just open someone’s Uploads playlist
+
+It’s tempting to think you could just open:
+
+```text
+https://www.youtube.com/playlist?list=[victims-uploads-playlist]
+```
+
+and immediately see all of a victim’s videos, but YouTube applies access control based on who is viewing: ([bugs.xdavidhu.me][1])
+
+* When the **owner** opens their “Uploads” playlist, they see all videos (Public, Unlisted, Private).
+* When **someone else** opens the same playlist, they see only Public videos. Unlisted and Private simply do not appear in the playlist.
+
+Conclusion: these playlists contain sensitive info (watch history, private playlists, unlisted video IDs, etc.), but they appear to be well-protected on the main YouTube site.
+
+---
+
+## Chapter 2 — The embedded player and its API
+
+The next piece is the YouTube IFrame Player and its JS API. ([bugs.xdavidhu.me][1])
+
+### 1. The IFrame Player
+
+* Website owners can embed YouTube via the IFrame Player:
+
+  * Simple `<iframe>` code from the docs.
+  * For more dynamic control (play, pause, etc.), there is the **YouTube IFrame Player API**. ([bugs.xdavidhu.me][1])
+
+### 2. PostMessage-based communication
+
+* The embedded player (the iframe from `youtube.com`) and the embedding page communicate using `window.postMessage`. ([bugs.xdavidhu.me][1])
+* The player listens for commands (`playVideo`, `pauseVideo`, etc.) and sends back info about the current state.
+
+Under the hood, calling `player.playVideo()` from JavaScript on your page sends a message to the iframe like: ([bugs.xdavidhu.me][1])
+
+```json
+{"event":"command","func":"playVideo","args":[],"id":1,"channel":"widget"}
+```
+
+The iframe replies with messages like: ([bugs.xdavidhu.me][1])
+
+```json
+{
+  "event": "infoDelivery",
+  "info": {
+    "playerState": -1,
+    "currentTime": 0,
+    "duration": 1344,
+    "videoData": {
+      "video_id": "M7lc1UVf-VE",
+      "author": "",
+      "title": "YouTube Developers Live: Embedded Web Player Customization"
+    },
+    ...
+    "videoUrl": "https://www.youtube.com/watch?v=M7lc1UVf-VE",
+    "playlist": null
+  },
+  "id": 1,
+  "channel": "widget"
+}
+```
+
+You can observe all these messages by doing (on any page with an embedded player): ([bugs.xdavidhu.me][1])
+
+```js
+window.addEventListener("message", function(event) {
+  console.log(event.data);
+});
+```
+
+### 3. `getPlaylist()` – list playlist contents
+
+* If a playlist is loaded into a player (for example via `player.loadPlaylist(playlist_id)`), calling `player.getPlaylist()` returns an array of video IDs in that playlist. ([bugs.xdavidhu.me][1])
+
+Example:
+
+```js
+> player.getPlaylist()
+Array(20) [ "KxgcVAuem8g", "U_OirTVxiFE", "rbez_1MEhdQ", ... ]
+```
+
+### 4. `getVideoData()` – metadata about current video
+
+* The embedded player also sends a `videoData` object back to the page.
+* `player.getVideoData()` returns fields like: `video_id`, `author`, `title`, `list` (the playlist ID), etc. ([bugs.xdavidhu.me][1])
+
+Example: ([bugs.xdavidhu.me][1])
+
+```js
+> player.getVideoData()
+{
+  video_id: "KxgcVAuem8g",
+  author: "LiveOverflow2",
+  title: "Astable 555 timer - Clock Module",
+  video_quality: "medium",
+  video_quality_features: [],
+  list: "PLGPckJAmiZCTyI72iI2KaJxkp-vUKBlTi"
+}
+```
+
+* This function was unofficial / not documented anymore, but still worked, and while the helper library might hide it, the underlying messages still contained the data.
+
+### 5. Critical fact: the embedded player is “logged in”
+
+* If you’re logged into YouTube in your browser, then the embedded player in any page is also effectively logged in.
+* Actions in the embedded player:
+
+  * Add to Watch History.
+  * Let you add videos to Watch Later via the clock icon.
+* In other words, if the victim is logged in, the embedded player has the same view of their account as the main YouTube site. ([bugs.xdavidhu.me][1])
+
+---
+
+## Chapter 3 — Connecting things together
+
+The bug comes from combining:
+
+1. Special, sensitive playlists that only the owner can fully see.
+2. An embedded player that is logged in as the user.
+3. An API that lets the embedding page query the playlist’s contents. ([bugs.xdavidhu.me][1])
+
+### 1. Initial idea
+
+While riding a tram, the author realized:
+
+* Only the owner can see full playlist contents (e.g., Watch History).
+* The embedded player, when used by a logged-in user, acts “as the owner”.
+* The IFrame API gives direct access to playlist contents via `getPlaylist()`.
+
+So the idea:
+
+> “If I load the victim’s sensitive playlists in an embedded player, then call `getPlaylist()`, can I read them as if I were the owner?” ([bugs.xdavidhu.me][1])
+
+### 2. First test: stealing Watch History (`HL`)
+
+* Build a page that:
+
+  * Embeds a YouTube player.
+  * Loads playlist `HL`.
+  * Once loaded, calls `player.getPlaylist()` and prints the array. ([bugs.xdavidhu.me][1])
+* Opening this page as a logged-in test account: watch history appears in the console.
+
+Result:
+
+* Visiting the attacker’s page leaks your Watch History.
+
+### 3. Extending the attack to other playlists
+
+The author then created a PoC page that demonstrated all possible abuses.
+
+#### 3.1 Stealing Watch Later (`WL`)
+
+* Exactly like `HL`, but use `WL`.
+* Load playlist `WL` into the player and call `getPlaylist()` to extract all the video IDs from the victim’s Watch Later playlist. ([bugs.xdavidhu.me][1])
+
+#### 3.2 Stealing Liked Videos
+
+This requires targeted setup:
+
+* For Watch History and Watch Later, every account uses the same ID (`HL`, `WL`).
+* For “Liked Videos”, the playlist ID is derived from the victim’s channel ID (via the `LLD` / `LLB` trick). ([bugs.xdavidhu.me][1])
+* If the attacker already knows the victim’s channel ID, they can:
+
+  * Generate both candidate playlist IDs.
+  * Try loading each into the player and calling `getPlaylist()`.
+  * The one that returns a non-empty playlist is the victim’s Liked Videos list.
+
+Impact:
+
+* Attacker obtains a full list of every video the victim has liked.
+
+#### 3.3 Stealing any private playlist (if ID known)
+
+* If the attacker already somehow knows the ID of a private playlist of the victim (hard, but not impossible with other bugs or leaks), they can:
+
+  * Load that playlist ID into the embedded player.
+  * Call `getPlaylist()` to list its contents, despite the playlist being private. ([bugs.xdavidhu.me][1])
+
+The impact here is limited by how hard it is to guess or obtain private playlist IDs, but technically the bug allowed it.
+
+#### 3.4 Stealing metadata of a private video (with known ID)
+
+* If the attacker knows the ID of a private video the victim has access to:
+
+  * They can embed that specific video.
+  * Use `player.getVideoData()` to read:
+
+    * The private video’s title.
+    * Additional metadata, like available caption languages. ([bugs.xdavidhu.me][1])
+
+Again, the difficulty is in obtaining the private video ID, but once known, the embedded player leaks the sensitive metadata via `videoData`.
+
+#### 3.5 Stealing all unlisted videos (Uploads playlist)
+
+This is the most impactful part. ([bugs.xdavidhu.me][1])
+
+* Recall: the “Uploads” playlist contains all videos (Public, Unlisted, Private).
+* However, when the Uploads playlist is embedded as the owner:
+
+  * Owner sees Public and Unlisted videos.
+  * Private videos are omitted from the embedded Uploads playlist view.
+* This still allows a powerful attack:
+
+  1. Derive the victim’s Uploads playlist ID from their channel ID (`UUD` or `UUB`).
+  2. Embed the Uploads playlist into the malicious page (player).
+  3. Call `player.getPlaylist()` to dump all video IDs that appear (Public + Unlisted). ([bugs.xdavidhu.me][1])
+
+Unlisted videos are “protected” only by their IDs (obscurity). Once the attacker has all these IDs:
+
+* They can open all of the victim’s unlisted videos directly.
+* This includes very sensitive content such as:
+
+  * Personal/unpublic videos.
+  * Security PoC videos for unfixed bugs (the author’s own case).
+
+### 4. The PoC page
+
+The PoC HTML did: ([bugs.xdavidhu.me][1])
+
+* Automatically embedded two players:
+
+  * One for `HL` (Watch History).
+  * One for `WL` (Watch Later).
+* Displayed the contents of each under the players.
+
+Further down, a “targeted attacks” section:
+
+* Input field for a channel ID:
+
+  * On submit, it:
+
+    * Listed the victim’s “Liked Videos”.
+    * Listed the victim’s “Uploaded videos”, including Unlisted ones.
+* Another input for “private video ID”:
+
+  * When provided, it:
+
+    * Embedded the private video.
+    * Used `getVideoData()` to display its title and caption languages.
+
+The PoC was shared with Google; screenshots in the writeup show the interface. ([bugs.xdavidhu.me][1])
+
+---
+
+## Chapter 4 — How it ends
+
+### 1. Reporting and triage
+
+* 2019-10-11, ~00:16: report submitted to Google VRP. ([bugs.xdavidhu.me][1])
+* Initial triage message after two weeks:
+
+  * “At first glance, this might not be severe enough to qualify for a reward.”
+* The author was discouraged since multiple previous bugs had similar triage texts, but the final decision still rested with the VRP panel. ([bugs.xdavidhu.me][1])
+
+Later:
+
+* About a month after the report, the author received an email from `buganizer-system@google.com`:
+
+  * The bug was rewarded with a bounty of **1,337 USD** (classic leet bounty). ([bugs.xdavidhu.me][1])
+
+### 2. The fix
+
+* 16 days after the reward email, Google notified that the issue was fixed. ([bugs.xdavidhu.me][1])
+
+First part of the fix:
+
+* When the embedded player loads a playlist, it fetches contents using:
+
+  ```text
+  /list_ajax?list=[playlist-id]
+  ```
+* After the fix, if you pass any private or special playlist ID to this endpoint:
+
+  * It returns an error.
+* Result:
+
+  * Embedding those sensitive playlists (HL, WL, Liked Videos, Uploads, private playlists) fails and the player shows an error instead of loading the playlist.
+  * That blocks the main attack that used `getPlaylist()` to read contents. ([bugs.xdavidhu.me][1])
+
+Second part:
+
+* One part of the bug still worked: leaking `videoData` for private videos, including the title and other info.
+* The author pinged the bug again, pointing out that `videoData` still leaked for private videos.
+* Response: Google said they would inform the product team, but there was no immediate visible follow-up. ([bugs.xdavidhu.me][1])
+
+Re-testing in 2021:
+
+* By the time the author re-examined the issue:
+
+  * For private videos:
+
+    * The video can still be embedded.
+    * But `videoData` sent to the embedding page is now an **empty object**.
+* This closes the metadata-leak path as well. ([bugs.xdavidhu.me][1])
+
+### 3. Final timeline
+
+From the writeup’s timeline section: ([bugs.xdavidhu.me][1])
+
+* 2019-10-11 — Bug reported
+* 2019-10-11 — Initial triage
+* 2019-10-24 — Bug accepted (priority updated P4 → P2)
+* 2019-11-14 — Reward of 1,337 USD issued
+* 2019-11-30 — First part of the bug mitigated (playlist loading restriction)
+* ??? 2020 — Second part mitigated (videoData fix)
+
+---
+
+## Impact analysis
+
+Security impact:
+
+* Passive attack: simply by visiting a malicious page with an embedded YouTube player, a logged-in user could have their:
+
+  * Watch History exposed.
+  * Watch Later items exposed.
+  * Liked videos enumerated (with some attacker knowledge of channel ID).
+  * Custom private playlists exposed (if ID known).
+  * Metadata of private videos exposed (if ID known).
+  * All unlisted uploads exposed via the Uploads playlist. ([bugs.xdavidhu.me][1])
+* The unlisted-video enumeration is particularly severe because many users store personal, internal, or pre-release content as unlisted.
+
+The author personally considered the impact higher than the issued reward, especially considering that many bug hunters store PoC videos for unfixed bugs as unlisted YouTube videos. ([bugs.xdavidhu.me][1])
+
+---
+
+## Root cause (conceptual)
+
+1. **Embedded player acts as the user**
+
+   * When embedded, the player sees exactly what the logged-in user sees (same account, same permissions). ([bugs.xdavidhu.me][1])
+
+2. **API grants playlist and video metadata to the embedding page**
+
+   * `getPlaylist()` and `getVideoData()` give the embedding origin full insight into what the player has loaded.
+
+3. **No access control for special/private playlists at the Player API layer (at that time)**
+
+   * As long as the embedded player is allowed to load a given playlist or private video, the embedding page can call the API and read the content or metadata, regardless of privacy settings on the main site.
+
+In short:
+
+> The privacy model assumed that “playlists are safe because only owners can see sensitive content,” but the embedded player with owner privileges and a generous JS API broke that assumption. ([bugs.xdavidhu.me][1])
+
+---
+
+## Defensive takeaways
+
+For platform / API designers:
+
+1. **Align embedded-API capabilities with privacy expectations**
+
+   * If an embedded player is effectively “logged in”, you must treat API methods such as `getPlaylist()` and `getVideoData()` as high-risk, because they reveal the same private data the main site sees. ([bugs.xdavidhu.me][1])
+
+2. **Treat special / private playlists as sensitive resources everywhere**
+
+   * Do not assume that only the main site will ever load them.
+   * Apply access control at the API endpoint level (e.g., `/list_ajax`) and at the embedded player layer.
+
+3. **Avoid leaking private metadata via generic APIs**
+
+   * Even if you disallow listing private playlists, metadata leaks (`videoData` on private videos) can still reveal sensitive information (titles, language settings, etc.).
+
+4. **Threat model embedded widgets as full trust boundaries**
+
+   * Any widget/iframe that is:
+
+     * Logged in as the user, and
+     * Controlled by a third-party embedding page
+   * must be assumed to leak to the embedding origin whatever the widget can see, unless explicitly and carefully constrained.
+
+5. **Test from the attacker’s perspective**
+
+   * Think like the author did: if I can embed “anything the user can see” and then query it via JS, what private objects can I enumerate or introspect?
+
+---
+
+## Author’s conclusion
+
+The author emphasizes a key philosophy about bug hunting: ([bugs.xdavidhu.me][1])
+
+> “In my opinion, the more you understand a system, the more ideas about how to break it will just naturally come to mind.”
+
+This bug was found not via fancy exploitation tricks, but by deeply understanding two subsystems (YouTube’s special playlists and the embedded player) and then mentally combining them.
+
+---
+
+## Suggested GitHub metadata / filename
+
+* Suggested filename:
+  `notes/2021-01-18-youtube-embedded-player-history-leak.md`
+* Optional front-matter:
+
+```yaml
+title: "The Embedded YouTube Player Told Me What You Were Watching (and more)"
+source: "David Hu"
+date: 2021-01-18
+severity: high
+status: fixed
+tags:
+  - youtube
+  - privacy
+  - access-control
+  - web-security
+  - bug-bounty
+reference: "https://bugs.xdavidhu.me/google/2021/01/18/the-embedded-youtube-player-told-me-what-you-were-watching-and-more/"
+```
+
+---
