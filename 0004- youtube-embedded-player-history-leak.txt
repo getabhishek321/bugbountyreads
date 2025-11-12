@@ -1,12 +1,3 @@
-Here’s a ready-to-upload GitHub markdown note for:
-
-**“The Embedded YouTube Player Told Me What You Were Watching (and more)” — David Hu** ([bugs.xdavidhu.me][1])
-
-You can drop it into something like:
-`notes/2021-01-18-youtube-embedded-player-history-leak.md`
-
----
-
 # The Embedded YouTube Player Told Me What You Were Watching (and more) — notes
 
 **Original writeup:** David Hu – “The Embedded YouTube Player Told Me What You Were Watching (and more)” ([bugs.xdavidhu.me][1])
@@ -458,26 +449,7 @@ The author emphasizes a key philosophy about bug hunting: ([bugs.xdavidhu.me][1]
 
 This bug was found not via fancy exploitation tricks, but by deeply understanding two subsystems (YouTube’s special playlists and the embedded player) and then mentally combining them.
 
----
 
-## Suggested GitHub metadata / filename
-
-* Suggested filename:
-  `notes/2021-01-18-youtube-embedded-player-history-leak.md`
-* Optional front-matter:
-
-```yaml
-title: "The Embedded YouTube Player Told Me What You Were Watching (and more)"
-source: "David Hu"
-date: 2021-01-18
-severity: high
-status: fixed
-tags:
-  - youtube
-  - privacy
-  - access-control
-  - web-security
-  - bug-bounty
 reference: "https://bugs.xdavidhu.me/google/2021/01/18/the-embedded-youtube-player-told-me-what-you-were-watching-and-more/"
 ```
 
