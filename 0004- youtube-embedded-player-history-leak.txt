@@ -41,16 +41,16 @@ This playlist is not as straightforward:
 * The playlist ID is derived from the user’s channel ID (24 characters, visible in the URL of the channel page):
   Example:
 
-  ```text
+
   https://www.youtube.com/channel/UCBvX9uEO0a3fZNCK12MAgug
   channel_id = "UCBvX9uEO0a3fZNCK12MAgug"
-  ```
+  
 * The “Liked Videos” playlist ID can be guessed by replacing the first three characters with `LLD` or `LLB` (one of them is correct): ([bugs.xdavidhu.me][1])
 
-  ```text
+  
   "UCBvX9uEO0a3fZNCK12MAgug" -> "LLDvX9uEO0a3fZNCK12MAgug"
   "UCBvX9uEO0a3fZNCK12MAgug" -> "LLBvX9uEO0a3fZNCK12MAgug"
-  ```
+  
 
 ### 4. Uploads playlist (all videos, all privacy levels)
 
@@ -59,16 +59,14 @@ This is the most important for the attack:
 * The “Uploads” playlist contains every video on that channel (Public, Unlisted, and Private). ([bugs.xdavidhu.me][1])
 * Similarly, its ID is derived from the channel ID by replacing the first three characters with `UUD` or `UUB`:
 
-  ```text
   "UCBvX9uEO0a3fZNCK12MAgug" -> "UUDvX9uEO0a3fZNCK12MAgug"
   "UCBvX9uEO0a3fZNCK12MAgug" -> "UUBvX9uEO0a3fZNCK12MAgug"
-  ```
+  
 
 ### 5. Why you can’t just open someone’s Uploads playlist
 
 It’s tempting to think you could just open:
 
-```text
 https://www.youtube.com/playlist?list=[victims-uploads-playlist]
 ```
 
